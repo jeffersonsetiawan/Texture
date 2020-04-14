@@ -46,10 +46,7 @@ Pod::Spec.new do |spec|
 
   spec.subspec 'IGListKit' do |igl|
     igl.dependency 'IGListKit', '~> 4.0'
-<<<<<<< HEAD
-=======
     igl.dependency 'IGListDiffKit', '~> 4.0'
->>>>>>> upstream/master
     igl.dependency 'Texture/Core'
   end
 
