@@ -52,7 +52,7 @@ typedef void (^ASImageNodeDrawParametersBlock)(ASWeakMapEntry *entry);
   ASDisplayNodeContextModifier _willDisplayNodeContentWithRenderingContext;
   ASDisplayNodeContextModifier _didDisplayNodeContentWithRenderingContext;
   ASImageNodeDrawParametersBlock _didDrawBlock;
-  UIUserInterfaceStyle _userInterfaceStyle API_AVAILABLE(tvos(10.0), ios(12.0));
+  ASPrimitiveTraitCollection _traitCollection;
 }
 
 @end
@@ -209,7 +209,10 @@ typedef void (^ASImageNodeDrawParametersBlock)(ASWeakMapEntry *entry);
     return nil;
   }
 
-  return ASGraphicsCreateImageWithOptions(size, NO, 1, nil, nil, ^{
+  __instanceLock__.lock();
+  ASPrimitiveTraitCollection tc = _primitiveTraitCollection;
+  __instanceLock__.unlock();
+  return ASGraphicsCreateImageWithTraitCollectionAndOptions(tc, size, NO, 1, nil, ^{
     AS::MutexLocker l(__instanceLock__);
     [_placeholderColor setFill];
     UIRectFill(CGRectMake(0, 0, size.width, size.height));
@@ -299,46 +302,48 @@ typedef void (^ASImageNodeDrawParametersBlock)(ASWeakMapEntry *entry);
 
 - (NSObject *)drawParametersForAsyncLayer:(_ASDisplayLayer *)layer
 {
-  ASLockScopeSelf();
-
-  UIImage *drawImage = _image;
-  if (AS_AVAILABLE_IOS_TVOS(13, 10)) {
-    if (_imageNodeFlags.regenerateFromImageAsset && drawImage != nil) {
-      _imageNodeFlags.regenerateFromImageAsset = NO;
-      UITraitCollection *tc = [UITraitCollection traitCollectionWithUserInterfaceStyle:_primitiveTraitCollection.userInterfaceStyle];
-      UIImage *generatedImage = [drawImage.imageAsset imageWithTraitCollection:tc];
-      if ( generatedImage != nil ) {
-        drawImage = generatedImage;
+  ASImageNodeDrawParameters *drawParameters = [[ASImageNodeDrawParameters alloc] init];
+  
+  {
+    ASLockScopeSelf();
+    UIImage *drawImage = _image;
+    if (AS_AVAILABLE_IOS_TVOS(13, 10)) {
+      if (_imageNodeFlags.regenerateFromImageAsset && drawImage != nil) {
+        _imageNodeFlags.regenerateFromImageAsset = NO;
+        UITraitCollection *tc = [UITraitCollection traitCollectionWithUserInterfaceStyle:_primitiveTraitCollection.userInterfaceStyle];
+        UIImage *generatedImage = [drawImage.imageAsset imageWithTraitCollection:tc];
+        if ( generatedImage != nil ) {
+          drawImage = generatedImage;
+        }
       }
     }
-  }
 
-  ASImageNodeDrawParameters *drawParameters = [[ASImageNodeDrawParameters alloc] init];
-  drawParameters->_image = drawImage;
+    drawParameters->_image = drawImage;
+    drawParameters->_contentsScale = _contentsScaleForDisplay;
+    drawParameters->_cropEnabled = _imageNodeFlags.cropEnabled;
+    drawParameters->_forceUpscaling = _imageNodeFlags.forceUpscaling;
+    drawParameters->_forcedSize = _forcedSize;
+    drawParameters->_cropRect = _cropRect;
+    drawParameters->_cropDisplayBounds = _cropDisplayBounds;
+    drawParameters->_imageModificationBlock = _imageModificationBlock;
+    drawParameters->_willDisplayNodeContentWithRenderingContext = _willDisplayNodeContentWithRenderingContext;
+    drawParameters->_didDisplayNodeContentWithRenderingContext = _didDisplayNodeContentWithRenderingContext;
+    drawParameters->_traitCollection = _primitiveTraitCollection;
+
+    // Hack for now to retain the weak entry that was created while this drawing happened
+    drawParameters->_didDrawBlock = ^(ASWeakMapEntry *entry){
+      ASLockScopeSelf();
+      _weakCacheEntry = entry;
+    };
+  }
+  
+  // We need to unlock before we access the other accessor.
+  // Especially tintColor because it needs to walk up the view hierarchy
   drawParameters->_bounds = [self threadSafeBounds];
   drawParameters->_opaque = self.opaque;
-  drawParameters->_contentsScale = _contentsScaleForDisplay;
   drawParameters->_backgroundColor = self.backgroundColor;
-  drawParameters->_tintColor = self.tintColor;
   drawParameters->_contentMode = self.contentMode;
-  drawParameters->_cropEnabled = _imageNodeFlags.cropEnabled;
-  drawParameters->_forceUpscaling = _imageNodeFlags.forceUpscaling;
-  drawParameters->_forcedSize = _forcedSize;
-  drawParameters->_cropRect = _cropRect;
-  drawParameters->_cropDisplayBounds = _cropDisplayBounds;
-  drawParameters->_imageModificationBlock = _imageModificationBlock;
-  drawParameters->_willDisplayNodeContentWithRenderingContext = _willDisplayNodeContentWithRenderingContext;
-  drawParameters->_didDisplayNodeContentWithRenderingContext = _didDisplayNodeContentWithRenderingContext;
-  if (AS_AVAILABLE_IOS_TVOS(12, 10)) {
-    drawParameters->_userInterfaceStyle = self.primitiveTraitCollection.userInterfaceStyle;
-  }
-
-
-  // Hack for now to retain the weak entry that was created while this drawing happened
-  drawParameters->_didDrawBlock = ^(ASWeakMapEntry *entry){
-    ASLockScopeSelf();
-    _weakCacheEntry = entry;
-  };
+  drawParameters->_tintColor = self.tintColor;
 
   return drawParameters;
 }
@@ -436,8 +441,7 @@ typedef void (^ASImageNodeDrawParametersBlock)(ASWeakMapEntry *entry);
   contentsKey.imageModificationBlock = imageModificationBlock;
 
   if (AS_AVAILABLE_IOS_TVOS(12, 10)) {
-    UIUserInterfaceStyle userInterfaceStyle = drawParameter->_userInterfaceStyle;
-    contentsKey.userInterfaceStyle = userInterfaceStyle;
+    contentsKey.userInterfaceStyle = drawParameter->_traitCollection.userInterfaceStyle;
   }
 
   if (isCancelled()) {
@@ -492,18 +496,20 @@ static ASWeakMap<ASImageNodeContentsKey *, UIImage *> *cache = nil;
   }
 }
 
-+ (UIImage *)createContentsForkey:(ASImageNodeContentsKey *)key drawParameters:(id)drawParameters isCancelled:(asdisplaynode_iscancelled_block_t)isCancelled
++ (UIImage *)createContentsForkey:(ASImageNodeContentsKey *)key drawParameters:(id)parameter isCancelled:(asdisplaynode_iscancelled_block_t)isCancelled
 {
-  // The following `ASGraphicsCreateImageWithOptions` call will sometimes take take longer than 5ms on an
+  // The following `ASGraphicsCreateImageWithTraitCollectionAndOptions` call will sometimes take take longer than 5ms on an
   // A5 processor for a 400x800 backingSize.
   // Check for cancellation before we call it.
   if (isCancelled()) {
     return nil;
   }
+  
+  ASImageNodeDrawParameters *drawParameters = (ASImageNodeDrawParameters *)parameter;
 
   // Use contentsScale of 1.0 and do the contentsScale handling in boundsSizeInPixels so ASCroppedImageBackingSizeAndDrawRectInBounds
   // will do its rounding on pixel instead of point boundaries
-  UIImage *result = ASGraphicsCreateImageWithOptions(key.backingSize, key.isOpaque, 1.0, key.image, isCancelled, ^{
+  UIImage *result = ASGraphicsCreateImageWithTraitCollectionAndOptions(drawParameters->_traitCollection, key.backingSize, key.isOpaque, 1.0, key.image, ^{
     BOOL contextIsClean = YES;
 
     CGContextRef context = UIGraphicsGetCurrentContext();
@@ -620,10 +626,8 @@ static ASWeakMap<ASImageNodeContentsKey *, UIImage *> *cache = nil;
   [self setNeedsDisplay];
 }
 
-- (void)tintColorDidChange
+- (void)_setNeedsDisplayOnTemplatedImages
 {
-  [super tintColorDidChange];
-
   BOOL isTemplateImage = NO;
   {
     AS::MutexLocker l(__instanceLock__);
@@ -635,7 +639,21 @@ static ASWeakMap<ASImageNodeContentsKey *, UIImage *> *cache = nil;
   }
 }
 
+- (void)tintColorDidChange
+{
+  [super tintColorDidChange];
+
+  [self _setNeedsDisplayOnTemplatedImages];
+}
+
 #pragma mark Interface State
+
+- (void)didEnterHierarchy
+{
+  [super didEnterHierarchy];
+
+  [self _setNeedsDisplayOnTemplatedImages];
+}
 
 - (void)clearContents
 {
