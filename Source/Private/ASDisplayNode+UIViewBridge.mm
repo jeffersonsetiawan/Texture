@@ -1005,7 +1005,7 @@ if (shouldApply) { _layer.layerProperty = (layerValueExpr); } else { ASDisplayNo
 {
   _bridge_prologue_read;
 
-  if (AS_AVAILABLE_IOS(11.0)) {
+  if (AS_AVAILABLE_IOS_TVOS(11.0, 11.0)) {
     if (!_flags.layerBacked && _loaded(self)) {
       return self.view.safeAreaInsets;
     }
@@ -1029,7 +1029,7 @@ if (shouldApply) { _layer.layerProperty = (layerValueExpr); } else { ASDisplayNo
 
     _flags.fallbackInsetsLayoutMarginsFromSafeArea = insetsLayoutMarginsFromSafeArea;
 
-    if (AS_AVAILABLE_IOS(11.0)) {
+    if (AS_AVAILABLE_IOS_TVOS(11.0, 11.0)) {
       if (!_flags.layerBacked) {
         _setToViewOnly(insetsLayoutMarginsFromSafeArea, insetsLayoutMarginsFromSafeArea);
       }
@@ -1106,7 +1106,7 @@ if (shouldApply) { _layer.layerProperty = (layerValueExpr); } else { ASDisplayNo
 - (BOOL)_locked_insetsLayoutMarginsFromSafeArea
 {
   DISABLED_ASAssertLocked(__instanceLock__);
-  if (AS_AVAILABLE_IOS(11.0)) {
+  if (AS_AVAILABLE_IOS_TVOS(11.0, 11.0)) {
     if (!_flags.layerBacked) {
       return _getFromViewOnly(insetsLayoutMarginsFromSafeArea);
     }
@@ -1136,6 +1136,22 @@ if (shouldApply) { _layer.layerProperty = (layerValueExpr); } else { ASDisplayNo
 nodeProperty = nodeValueExpr; _setToViewOnly(viewAndPendingViewStateProperty, viewAndPendingViewStateExpr)
 
 @implementation ASDisplayNode (UIViewBridgeAccessibility)
+
+// Walks up the view tree to nil out all the cached accsesibilityElements. This is required when changing
+// accessibility properties like accessibilityViewIsModal.
+- (void)invalidateAccessibilityElements
+{
+  // If we are not caching accessibilityElements we don't need to do anything here.
+  if (ASActivateExperimentalFeature(ASExperimentalDoNotCacheAccessibilityElements)) {
+    return;
+  }
+  
+  // we want to check if we are on the main thread first, since _loaded checks the layer and can only be done on main
+  if (ASDisplayNodeThreadIsMain() && _loaded(self)) {
+    self.view.accessibilityElements = nil;
+    [self.supernode invalidateAccessibilityElements];
+  }
+}
 
 - (BOOL)isAccessibilityElement
 {
@@ -1294,7 +1310,13 @@ nodeProperty = nodeValueExpr; _setToViewOnly(viewAndPendingViewStateProperty, vi
 - (void)setAccessibilityElementsHidden:(BOOL)accessibilityElementsHidden
 {
   _bridge_prologue_write;
+  BOOL oldHiddenValue = _getFromViewOnly(accessibilityElementsHidden);
   _setAccessibilityToViewAndProperty(_flags.accessibilityElementsHidden, accessibilityElementsHidden, accessibilityElementsHidden, accessibilityElementsHidden);
+
+  // if we made a change, we need to clear the view's accessibilityElements cache.
+  if (!ASActivateExperimentalFeature(ASExperimentalDoNotCacheAccessibilityElements) && self.isNodeLoaded && oldHiddenValue != accessibilityElementsHidden) {
+    [self invalidateAccessibilityElements];
+  }
 }
 
 - (BOOL)accessibilityViewIsModal
@@ -1306,8 +1328,15 @@ nodeProperty = nodeValueExpr; _setToViewOnly(viewAndPendingViewStateProperty, vi
 - (void)setAccessibilityViewIsModal:(BOOL)accessibilityViewIsModal
 {
   _bridge_prologue_write;
+  BOOL oldAccessibilityViewIsModal = _getFromViewOnly(accessibilityViewIsModal);
   _setAccessibilityToViewAndProperty(_flags.accessibilityViewIsModal, accessibilityViewIsModal, accessibilityViewIsModal, accessibilityViewIsModal);
+  
+  // if we made a change, we need to clear the view's accessibilityElements cache.
+  if (!ASActivateExperimentalFeature(ASExperimentalDoNotCacheAccessibilityElements) && self.isNodeLoaded && oldAccessibilityViewIsModal != accessibilityViewIsModal) {
+    [self invalidateAccessibilityElements];
+  }
 }
+
 
 - (BOOL)shouldGroupAccessibilityChildren
 {
